@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+package buildbarn.schedulerhandover;
+
+option go_package = "github.com/buildbarn/bb-remote-execution/pkg/proto/schedulerhandover";
+
+// Handover coordinates zero-downtime state transfer from an active
+// leader bb_scheduler instance (O) to a candidate instance (N).
+service Handover {
+  // TakeOver is called by the candidate (N) against the current leader
+  // (O) to freeze O's build queue, stream a point-in-time Snapshot to N,
+  // wait for N to restore the snapshot, CAS-update leadership on O, and
+  // finally transition O to RETIRED (or back to LEADER on abort).
+  rpc TakeOver(stream HandoverClientToLeader)
+      returns (stream HandoverLeaderToClient);
+
+  // Ping acquires and releases the build queue lock to verify that the
+  // scheduler's main loop is responsive.
+  rpc Ping(PingRequest) returns (PingResponse);
+}
+
+message LeaderEndpoints {
+  string leader_id = 1;
+  string client_endpoint = 2;
+  string worker_endpoint = 3;
+  string state_endpoint = 4;
+  string handover_endpoint = 5;
+}
+
+message HandoverClientToLeader {
+  message BeginRequest {
+    LeaderEndpoints candidate = 1;
+    uint64 expected_epoch = 2;
+  }
+
+  message RestoredAck {
+    bool success = 1;
+    string error = 2;
+  }
+
+  message CommitNotification {
+    bool committed = 1;
+    string error = 2;
+  }
+
+  oneof message {
+    BeginRequest begin = 1;
+    RestoredAck restored_ack = 2;
+    CommitNotification commit = 3;
+  }
+}
+
+message HandoverLeaderToClient {
+  message LeadershipTransferred {
+    uint64 epoch = 1;
+  }
+
+  message SnapshotChunk {
+    bytes data = 1;
+    bool is_last = 2;
+    uint32 tasks_count = 3;
+    uint32 operations_count = 4;
+  }
+
+  oneof message {
+    SnapshotChunk snapshot_chunk = 1;
+    LeadershipTransferred leadership_transferred = 2;
+  }
+}
+
+message PingRequest {}
+
+message PingResponse {}

@@ -6,6 +6,7 @@ go_library(
         "action_router.go",
         "configuration.go",
         "demultiplexing_action_router.go",
+        "reloadable_action_router.go",
         "remote_action_router.go",
         "simple_action_router.go",
     ],
@@ -32,6 +33,7 @@ go_test(
     name = "routing_test",
     srcs = [
         "demultiplexing_action_router_test.go",
+        "reloadable_action_router_test.go",
         "remote_action_router_test.go",
     ],
     deps = [

@@ -74,3 +74,10 @@ type Learner interface {
 	// action.
 	Abandoned()
 }
+
+// FallbackExecutionParametersProvider exposes the execution parameters needed
+// to retry a failed action after transferring it to another scheduler. Reading
+// these parameters must not update or release the learner's feedback state.
+type FallbackExecutionParametersProvider interface {
+	GetFallbackExecutionParameters() (expectedDuration, timeout time.Duration, retry bool)
+}

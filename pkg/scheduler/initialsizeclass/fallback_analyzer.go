@@ -55,6 +55,10 @@ func (fallbackSelector) Abandoned() {}
 
 type fallbackLearner struct{}
 
+func (fallbackLearner) GetFallbackExecutionParameters() (time.Duration, time.Duration, bool) {
+	return 0, 0, false
+}
+
 func (fallbackLearner) Succeeded(duration time.Duration, sizeClasses []uint32) (int, time.Duration, time.Duration, Learner) {
 	// There is no learning that needs to be performed in the
 	// background.
@@ -66,6 +70,10 @@ func (fallbackLearner) Abandoned() {}
 type smallerFallbackLearner struct {
 	fallbackLearner
 	timeout time.Duration
+}
+
+func (l smallerFallbackLearner) GetFallbackExecutionParameters() (time.Duration, time.Duration, bool) {
+	return l.timeout, l.timeout, true
 }
 
 func (l smallerFallbackLearner) Failed(timedOut bool) (time.Duration, time.Duration, Learner) {

@@ -1,0 +1,30 @@
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
+load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//proto:def.bzl", "go_proto_library")
+
+proto_library(
+    name = "coordinator_proto",
+    srcs = ["coordinator.proto"],
+    import_prefix = "github.com/buildbarn/bb-remote-execution",
+    visibility = ["//visibility:public"],
+    deps = ["//pkg/proto/schedulerhandover:schedulerhandover_proto"],
+)
+
+go_proto_library(
+    name = "coordinator_go_proto",
+    compilers = [
+        "@rules_go//proto:go_proto",
+        "@rules_go//proto:go_grpc_v2",
+    ],
+    importpath = "github.com/buildbarn/bb-remote-execution/pkg/proto/coordinator",
+    proto = ":coordinator_proto",
+    visibility = ["//visibility:public"],
+    deps = ["//pkg/proto/schedulerhandover"],
+)
+
+go_library(
+    name = "coordinator",
+    embed = [":coordinator_go_proto"],
+    importpath = "github.com/buildbarn/bb-remote-execution/pkg/proto/coordinator",
+    visibility = ["//visibility:public"],
+)
