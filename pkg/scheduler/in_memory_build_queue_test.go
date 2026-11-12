@@ -4524,3 +4524,250 @@ func TestInMemoryBuildQueueNestedInvocationsSynchronization(t *testing.T) {
 		<-allWorkersWait
 	}
 }
+
+func TestInMemoryBuildQueueReconcilePredeclaredPlatformQueues(t *testing.T) {
+	ctrl, ctx := gomock.WithContext(context.Background(), t)
+
+	actionReader := mock.NewMockReader[*remoteexecution.Action](ctrl)
+	mockClock := mock.NewMockClock(ctrl)
+	mockClock.EXPECT().Now().Return(time.Unix(1000, 0))
+	uuidGenerator := mock.NewMockUUIDGenerator(ctrl)
+	actionRouter := mock.NewMockActionRouter(ctrl)
+	buildQueue := scheduler.NewInMemoryBuildQueue(
+		actionReader,
+		mockClock,
+		uuidGenerator.Call,
+		&buildQueueConfigurationForTesting,
+		actionRouter,
+		allowAllAuthorizer,
+		allowAllAuthorizer,
+		allowAllAuthorizer,
+		allowAllAuthorizer,
+	)
+	executionClient := getExecutionClient(t, buildQueue)
+
+	platformDynamic := &remoteexecution.Platform{
+		Properties: []*remoteexecution.Platform_Property{
+			{Name: "cpu", Value: "x86_64"},
+			{Name: "os", Value: "linux"},
+		},
+	}
+
+	// Step 1: Register a dynamic queue via Synchronize with a worker that reports Executing (so it returns immediately).
+	mockClock.EXPECT().Now().Return(time.Unix(1001, 0))
+	_, err := buildQueue.Synchronize(ctx, &remoteworker.SynchronizeRequest{
+		WorkerId: map[string]string{
+			"hostname": "worker-dyn-1",
+		},
+		InstanceNamePrefix: "main",
+		Platform:           platformDynamic,
+		SizeClass:          2,
+		CurrentState: &remoteworker.CurrentState{
+			WorkerState: &remoteworker.CurrentState_Executing_{
+				Executing: &remoteworker.CurrentState_Executing{
+					ActionDigest: &remoteexecution.Digest{
+						Hash:      "099a3f6dc1e8e91dbcca4ea964cd2237d4b11733",
+						SizeBytes: 123,
+					},
+					ExecutionState: &remoteworker.CurrentState_Executing_FetchingInputs{
+						FetchingInputs: &emptypb.Empty{},
+					},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	// Step 2: Reconcile predeclared queues:
+	// - Add a brand-new predeclared queue (platformForTesting, sizeClasses [0])
+	// - Promote platformDynamic (currently has sizeClass 2 with worker-dyn-1) to predeclared with sizeClasses [1, 2, 4] and stickiness limits [10m].
+	mockClock.EXPECT().Now().Return(time.Unix(1002, 0))
+	pendingRestart, err := buildQueue.ReconcilePredeclaredPlatformQueues([]scheduler.PredeclaredPlatformQueueParams{
+		{
+			InstanceNamePrefix:               util.Must(digest.NewInstanceName("main")),
+			Platform:                         platformForTesting,
+			SizeClasses:                      []uint32{0},
+			WorkerInvocationStickinessLimits: []time.Duration{5 * time.Minute},
+		},
+		{
+			InstanceNamePrefix:               util.Must(digest.NewInstanceName("main")),
+			Platform:                         platformDynamic,
+			SizeClasses:                      []uint32{1, 2, 4},
+			WorkerInvocationStickinessLimits: []time.Duration{10 * time.Minute},
+		},
+	})
+	require.NoError(t, err)
+	require.Empty(t, pendingRestart)
+
+	// Verify both queues are now predeclared (Timeout == nil on all size class queues).
+	mockClock.EXPECT().Now().Return(time.Unix(1003, 0))
+	pqResp, err := buildQueue.ListPlatformQueues(ctx, &emptypb.Empty{})
+	require.NoError(t, err)
+	testutil.RequireEqualProto(t, &buildqueuestate.ListPlatformQueuesResponse{
+		PlatformQueues: []*buildqueuestate.PlatformQueueState{
+			{
+				Name: &buildqueuestate.PlatformQueueName{
+					InstanceNamePrefix: "main",
+					Platform:           platformForTesting,
+				},
+				SizeClassQueues: []*buildqueuestate.SizeClassQueueState{
+					{
+						SizeClass: 0,
+						RootInvocation: &buildqueuestate.InvocationState{
+							QueuedOperationsCount: &buildqueuestate.InvocationState_InvocationObjectCount{},
+						},
+					},
+				},
+			},
+			{
+				Name: &buildqueuestate.PlatformQueueName{
+					InstanceNamePrefix: "main",
+					Platform:           platformDynamic,
+				},
+				SizeClassQueues: []*buildqueuestate.SizeClassQueueState{
+					{
+						SizeClass: 1,
+						RootInvocation: &buildqueuestate.InvocationState{
+							QueuedOperationsCount: &buildqueuestate.InvocationState_InvocationObjectCount{},
+						},
+					},
+					{
+						SizeClass: 2,
+						RootInvocation: &buildqueuestate.InvocationState{
+							QueuedOperationsCount: &buildqueuestate.InvocationState_InvocationObjectCount{},
+							IdleWorkersCount:      1,
+						},
+						WorkersCount: 1,
+					},
+					{
+						SizeClass: 4,
+						RootInvocation: &buildqueuestate.InvocationState{
+							QueuedOperationsCount: &buildqueuestate.InvocationState_InvocationObjectCount{},
+						},
+					},
+				},
+			},
+		},
+	}, pqResp)
+
+	// Step 3: Enqueue a task on the promoted platformDynamic queue (sizeClass 2) and assign it to worker-dyn-1.
+	// This verifies that w.stickinessStartingTimes was resized during promotion and does not panic.
+	action := &remoteexecution.Action{
+		CommandDigest: &remoteexecution.Digest{
+			Hash:      "61c585c297d00409bd477b6b80759c94ec545ab4",
+			SizeBytes: 456,
+		},
+		DoNotCache: true,
+	}
+	actionReader.EXPECT().Read(
+		gomock.Any(),
+		digest.MustNewDigest("main", remoteexecution.DigestFunction_SHA1, "da39a3ee5e6b4b0d3255bfef95601890afd80709", 123),
+	).Return(action, nil)
+	initialSizeClassSelector := mock.NewMockSelector(ctrl)
+	actionRouter.EXPECT().RouteAction(gomock.Any(), gomock.Any(), testutil.EqProto(t, action), nil).Return(
+		action,
+		platform.MustNewKey("main", platformDynamic),
+		nil,
+		initialSizeClassSelector,
+		nil,
+	)
+	initialSizeClassLearner := mock.NewMockLearner(ctrl)
+	initialSizeClassSelector.EXPECT().Select([]uint32{1, 2, 4}).
+		Return(1, 15*time.Minute, 30*time.Minute, initialSizeClassLearner)
+	mockClock.EXPECT().Now().Return(time.Unix(1004, 0))
+	timer1 := mock.NewMockTimer(ctrl)
+	mockClock.EXPECT().NewTimer(time.Minute).Return(timer1, nil)
+	uuidGenerator.EXPECT().Call().Return(uuid.Parse("36ebab65-3c4f-4faf-818b-2eabb4cd1b02"))
+
+	stream1, err := executionClient.Execute(ctx, &remoteexecution.ExecuteRequest{
+		InstanceName: "main",
+		ActionDigest: &remoteexecution.Digest{
+			Hash:      "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+			SizeBytes: 123,
+		},
+	})
+	require.NoError(t, err)
+	_, err = stream1.Recv()
+	require.NoError(t, err)
+
+	mockClock.EXPECT().Now().Return(time.Unix(1005, 0))
+	timer1.EXPECT().Stop().Return(true)
+	mockClock.EXPECT().Now().Return(time.Unix(1005, 0))
+	timer2 := mock.NewMockTimer(ctrl)
+	mockClock.EXPECT().NewTimer(time.Minute).Return(timer2, nil)
+	timer2.EXPECT().Stop().Return(true)
+
+	syncResp, err := buildQueue.Synchronize(ctx, &remoteworker.SynchronizeRequest{
+		WorkerId: map[string]string{
+			"hostname": "worker-dyn-1",
+		},
+		InstanceNamePrefix: "main",
+		Platform:           platformDynamic,
+		SizeClass:          2,
+		CurrentState: &remoteworker.CurrentState{
+			WorkerState: &remoteworker.CurrentState_Idle{
+				Idle: &emptypb.Empty{},
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, syncResp.DesiredState.GetExecuting())
+	_, err = stream1.Recv()
+	require.NoError(t, err)
+
+	// Step 4: Demote platformForTesting by removing it from the desired list.
+	mockClock.EXPECT().Now().Return(time.Unix(1006, 0))
+	pendingRestart, err = buildQueue.ReconcilePredeclaredPlatformQueues([]scheduler.PredeclaredPlatformQueueParams{
+		{
+			InstanceNamePrefix:               util.Must(digest.NewInstanceName("main")),
+			Platform:                         platformDynamic,
+			SizeClasses:                      []uint32{1, 2, 4},
+			WorkerInvocationStickinessLimits: []time.Duration{10 * time.Minute},
+		},
+	})
+	require.NoError(t, err)
+	require.Empty(t, pendingRestart)
+
+	// Step 5: The size classes of an existing predeclared queue cannot
+	// be changed in place. The change must be reported as requiring a
+	// restart, and the queue must be left untouched.
+	mockClock.EXPECT().Now().Return(time.Unix(1007, 0))
+	pendingRestart, err = buildQueue.ReconcilePredeclaredPlatformQueues([]scheduler.PredeclaredPlatformQueueParams{
+		{
+			InstanceNamePrefix:               util.Must(digest.NewInstanceName("main")),
+			Platform:                         platformDynamic,
+			SizeClasses:                      []uint32{1, 2},
+			WorkerInvocationStickinessLimits: []time.Duration{10 * time.Minute},
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, pendingRestart, 1)
+	require.Contains(t, pendingRestart[0], "has size classes [1 2 4]")
+	require.Contains(t, pendingRestart[0], "requests [1 2]")
+
+	// Invalid input must be rejected before anything is changed.
+	_, err = buildQueue.ReconcilePredeclaredPlatformQueues([]scheduler.PredeclaredPlatformQueueParams{
+		{
+			InstanceNamePrefix: util.Must(digest.NewInstanceName("main")),
+			Platform:           platformDynamic,
+			SizeClasses:        []uint32{2, 1},
+		},
+	})
+	testutil.RequireEqualStatus(t, status.Error(codes.InvalidArgument, "Size classes must be provided in sorted order"), err)
+
+	// Advance past PlatformQueueWithNoWorkersTimeout (15m = 900s -> 1006 + 900 = 1906) so platformForTesting is cleaned up,
+	// while platformDynamic remains predeclared.
+	initialSizeClassLearner.EXPECT().Abandoned()
+	mockClock.EXPECT().Now().Return(time.Unix(1906, 0)).Times(3)
+	pqResp, err = buildQueue.ListPlatformQueues(ctx, &emptypb.Empty{})
+	require.NoError(t, err)
+	require.Len(t, pqResp.PlatformQueues, 1)
+	testutil.RequireEqualProto(t, &buildqueuestate.PlatformQueueName{
+		InstanceNamePrefix: "main",
+		Platform:           platformDynamic,
+	}, pqResp.PlatformQueues[0].Name)
+	_, err = stream1.Recv()
+	require.NoError(t, err)
+	_, err = stream1.Recv()
+	require.Equal(t, io.EOF, err)
+}

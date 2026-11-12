@@ -48,6 +48,9 @@ type ApplicationConfiguration struct {
 	ModifyDrainsAuthorizer            *auth.AuthorizerConfiguration                     `protobuf:"bytes,20,opt,name=modify_drains_authorizer,json=modifyDrainsAuthorizer,proto3" json:"modify_drains_authorizer,omitempty"`
 	KillOperationsAuthorizer          *auth.AuthorizerConfiguration                     `protobuf:"bytes,21,opt,name=kill_operations_authorizer,json=killOperationsAuthorizer,proto3" json:"kill_operations_authorizer,omitempty"`
 	SynchronizeAuthorizer             *auth.AuthorizerConfiguration                     `protobuf:"bytes,23,opt,name=synchronize_authorizer,json=synchronizeAuthorizer,proto3" json:"synchronize_authorizer,omitempty"`
+	ConfigurationReloadInterval       *durationpb.Duration                              `protobuf:"bytes,25,opt,name=configuration_reload_interval,json=configurationReloadInterval,proto3" json:"configuration_reload_interval,omitempty"`
+	HandoverGrpcServers               []*grpc.ServerConfiguration                       `protobuf:"bytes,26,rep,name=handover_grpc_servers,json=handoverGrpcServers,proto3" json:"handover_grpc_servers,omitempty"`
+	Coordinator                       *CoordinatorConfiguration                         `protobuf:"bytes,27,opt,name=coordinator,proto3" json:"coordinator,omitempty"`
 	unknownFields                     protoimpl.UnknownFields
 	sizeCache                         protoimpl.SizeCache
 }
@@ -201,6 +204,143 @@ func (x *ApplicationConfiguration) GetSynchronizeAuthorizer() *auth.AuthorizerCo
 	return nil
 }
 
+func (x *ApplicationConfiguration) GetConfigurationReloadInterval() *durationpb.Duration {
+	if x != nil {
+		return x.ConfigurationReloadInterval
+	}
+	return nil
+}
+
+func (x *ApplicationConfiguration) GetHandoverGrpcServers() []*grpc.ServerConfiguration {
+	if x != nil {
+		return x.HandoverGrpcServers
+	}
+	return nil
+}
+
+func (x *ApplicationConfiguration) GetCoordinator() *CoordinatorConfiguration {
+	if x != nil {
+		return x.Coordinator
+	}
+	return nil
+}
+
+type CoordinatorConfiguration struct {
+	state                         protoimpl.MessageState    `protogen:"open.v1"`
+	Client                        *grpc.ClientConfiguration `protobuf:"bytes,1,opt,name=client,proto3" json:"client,omitempty"`
+	SelfId                        string                    `protobuf:"bytes,2,opt,name=self_id,json=selfId,proto3" json:"self_id,omitempty"`
+	SelfClientEndpoint            string                    `protobuf:"bytes,3,opt,name=self_client_endpoint,json=selfClientEndpoint,proto3" json:"self_client_endpoint,omitempty"`
+	SelfWorkerEndpoint            string                    `protobuf:"bytes,4,opt,name=self_worker_endpoint,json=selfWorkerEndpoint,proto3" json:"self_worker_endpoint,omitempty"`
+	SelfStateEndpoint             string                    `protobuf:"bytes,5,opt,name=self_state_endpoint,json=selfStateEndpoint,proto3" json:"self_state_endpoint,omitempty"`
+	SelfHandoverEndpoint          string                    `protobuf:"bytes,6,opt,name=self_handover_endpoint,json=selfHandoverEndpoint,proto3" json:"self_handover_endpoint,omitempty"`
+	PeerClientTemplate            *grpc.ClientConfiguration `protobuf:"bytes,7,opt,name=peer_client_template,json=peerClientTemplate,proto3" json:"peer_client_template,omitempty"`
+	AdoptionWindow                *durationpb.Duration      `protobuf:"bytes,8,opt,name=adoption_window,json=adoptionWindow,proto3" json:"adoption_window,omitempty"`
+	RecoveredOperationGracePeriod *durationpb.Duration      `protobuf:"bytes,9,opt,name=recovered_operation_grace_period,json=recoveredOperationGracePeriod,proto3" json:"recovered_operation_grace_period,omitempty"`
+	RelayDrainPeriod              *durationpb.Duration      `protobuf:"bytes,10,opt,name=relay_drain_period,json=relayDrainPeriod,proto3" json:"relay_drain_period,omitempty"`
+	unknownFields                 protoimpl.UnknownFields
+	sizeCache                     protoimpl.SizeCache
+}
+
+func (x *CoordinatorConfiguration) Reset() {
+	*x = CoordinatorConfiguration{}
+	mi := &file_github_com_buildbarn_bb_remote_execution_pkg_proto_configuration_bb_scheduler_bb_scheduler_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CoordinatorConfiguration) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CoordinatorConfiguration) ProtoMessage() {}
+
+func (x *CoordinatorConfiguration) ProtoReflect() protoreflect.Message {
+	mi := &file_github_com_buildbarn_bb_remote_execution_pkg_proto_configuration_bb_scheduler_bb_scheduler_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CoordinatorConfiguration.ProtoReflect.Descriptor instead.
+func (*CoordinatorConfiguration) Descriptor() ([]byte, []int) {
+	return file_github_com_buildbarn_bb_remote_execution_pkg_proto_configuration_bb_scheduler_bb_scheduler_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *CoordinatorConfiguration) GetClient() *grpc.ClientConfiguration {
+	if x != nil {
+		return x.Client
+	}
+	return nil
+}
+
+func (x *CoordinatorConfiguration) GetSelfId() string {
+	if x != nil {
+		return x.SelfId
+	}
+	return ""
+}
+
+func (x *CoordinatorConfiguration) GetSelfClientEndpoint() string {
+	if x != nil {
+		return x.SelfClientEndpoint
+	}
+	return ""
+}
+
+func (x *CoordinatorConfiguration) GetSelfWorkerEndpoint() string {
+	if x != nil {
+		return x.SelfWorkerEndpoint
+	}
+	return ""
+}
+
+func (x *CoordinatorConfiguration) GetSelfStateEndpoint() string {
+	if x != nil {
+		return x.SelfStateEndpoint
+	}
+	return ""
+}
+
+func (x *CoordinatorConfiguration) GetSelfHandoverEndpoint() string {
+	if x != nil {
+		return x.SelfHandoverEndpoint
+	}
+	return ""
+}
+
+func (x *CoordinatorConfiguration) GetPeerClientTemplate() *grpc.ClientConfiguration {
+	if x != nil {
+		return x.PeerClientTemplate
+	}
+	return nil
+}
+
+func (x *CoordinatorConfiguration) GetAdoptionWindow() *durationpb.Duration {
+	if x != nil {
+		return x.AdoptionWindow
+	}
+	return nil
+}
+
+func (x *CoordinatorConfiguration) GetRecoveredOperationGracePeriod() *durationpb.Duration {
+	if x != nil {
+		return x.RecoveredOperationGracePeriod
+	}
+	return nil
+}
+
+func (x *CoordinatorConfiguration) GetRelayDrainPeriod() *durationpb.Duration {
+	if x != nil {
+		return x.RelayDrainPeriod
+	}
+	return nil
+}
+
 type PredeclaredPlatformQueueConfiguration struct {
 	state                                     protoimpl.MessageState `protogen:"open.v1"`
 	InstanceNamePrefix                        string                 `protobuf:"bytes,1,opt,name=instance_name_prefix,json=instanceNamePrefix,proto3" json:"instance_name_prefix,omitempty"`
@@ -215,7 +355,7 @@ type PredeclaredPlatformQueueConfiguration struct {
 
 func (x *PredeclaredPlatformQueueConfiguration) Reset() {
 	*x = PredeclaredPlatformQueueConfiguration{}
-	mi := &file_github_com_buildbarn_bb_remote_execution_pkg_proto_configuration_bb_scheduler_bb_scheduler_proto_msgTypes[1]
+	mi := &file_github_com_buildbarn_bb_remote_execution_pkg_proto_configuration_bb_scheduler_bb_scheduler_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -227,7 +367,7 @@ func (x *PredeclaredPlatformQueueConfiguration) String() string {
 func (*PredeclaredPlatformQueueConfiguration) ProtoMessage() {}
 
 func (x *PredeclaredPlatformQueueConfiguration) ProtoReflect() protoreflect.Message {
-	mi := &file_github_com_buildbarn_bb_remote_execution_pkg_proto_configuration_bb_scheduler_bb_scheduler_proto_msgTypes[1]
+	mi := &file_github_com_buildbarn_bb_remote_execution_pkg_proto_configuration_bb_scheduler_bb_scheduler_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -240,7 +380,7 @@ func (x *PredeclaredPlatformQueueConfiguration) ProtoReflect() protoreflect.Mess
 
 // Deprecated: Use PredeclaredPlatformQueueConfiguration.ProtoReflect.Descriptor instead.
 func (*PredeclaredPlatformQueueConfiguration) Descriptor() ([]byte, []int) {
-	return file_github_com_buildbarn_bb_remote_execution_pkg_proto_configuration_bb_scheduler_bb_scheduler_proto_rawDescGZIP(), []int{1}
+	return file_github_com_buildbarn_bb_remote_execution_pkg_proto_configuration_bb_scheduler_bb_scheduler_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *PredeclaredPlatformQueueConfiguration) GetInstanceNamePrefix() string {
@@ -289,7 +429,7 @@ var File_github_com_buildbarn_bb_remote_execution_pkg_proto_configuration_bb_sch
 
 const file_github_com_buildbarn_bb_remote_execution_pkg_proto_configuration_bb_scheduler_bb_scheduler_proto_rawDesc = "" +
 	"\n" +
-	"`github.com/buildbarn/bb-remote-execution/pkg/proto/configuration/bb_scheduler/bb_scheduler.proto\x12$buildbarn.configuration.bb_scheduler\x1a6build/bazel/remote/execution/v2/remote_execution.proto\x1aZgithub.com/buildbarn/bb-remote-execution/pkg/proto/configuration/scheduler/scheduler.proto\x1aGgithub.com/buildbarn/bb-storage/pkg/proto/configuration/auth/auth.proto\x1aQgithub.com/buildbarn/bb-storage/pkg/proto/configuration/blobstore/blobstore.proto\x1aKgithub.com/buildbarn/bb-storage/pkg/proto/configuration/global/global.proto\x1aGgithub.com/buildbarn/bb-storage/pkg/proto/configuration/grpc/grpc.proto\x1aPgithub.com/buildbarn/bb-storage/pkg/proto/configuration/http/server/server.proto\x1a\x1egoogle/protobuf/duration.proto\"\x87\x0e\n" +
+	"`github.com/buildbarn/bb-remote-execution/pkg/proto/configuration/bb_scheduler/bb_scheduler.proto\x12$buildbarn.configuration.bb_scheduler\x1a6build/bazel/remote/execution/v2/remote_execution.proto\x1aZgithub.com/buildbarn/bb-remote-execution/pkg/proto/configuration/scheduler/scheduler.proto\x1aGgithub.com/buildbarn/bb-storage/pkg/proto/configuration/auth/auth.proto\x1aQgithub.com/buildbarn/bb-storage/pkg/proto/configuration/blobstore/blobstore.proto\x1aKgithub.com/buildbarn/bb-storage/pkg/proto/configuration/global/global.proto\x1aGgithub.com/buildbarn/bb-storage/pkg/proto/configuration/grpc/grpc.proto\x1aPgithub.com/buildbarn/bb-storage/pkg/proto/configuration/http/server/server.proto\x1a\x1egoogle/protobuf/duration.proto\"\xaf\x10\n" +
 	"\x18ApplicationConfiguration\x122\n" +
 	"\x15deprecated_portal_url\x18\x05 \x01(\tR\x13deprecatedPortalUrl\x12u\n" +
 	"\x1ddeprecated_admin_http_servers\x18\x13 \x03(\v22.buildbarn.configuration.http.server.ConfigurationR\x1adeprecatedAdminHttpServers\x12A\n" +
@@ -307,9 +447,24 @@ const file_github_com_buildbarn_bb_remote_execution_pkg_proto_configuration_bb_s
 	"&platform_queue_with_no_workers_timeout\x18\x12 \x01(\v2\x19.google.protobuf.DurationR!platformQueueWithNoWorkersTimeout\x12o\n" +
 	"\x18modify_drains_authorizer\x18\x14 \x01(\v25.buildbarn.configuration.auth.AuthorizerConfigurationR\x16modifyDrainsAuthorizer\x12s\n" +
 	"\x1akill_operations_authorizer\x18\x15 \x01(\v25.buildbarn.configuration.auth.AuthorizerConfigurationR\x18killOperationsAuthorizer\x12l\n" +
-	"\x16synchronize_authorizer\x18\x17 \x01(\v25.buildbarn.configuration.auth.AuthorizerConfigurationR\x15synchronizeAuthorizerJ\x04\b\x02\x10\x03J\x04\b\t\x10\n" +
+	"\x16synchronize_authorizer\x18\x17 \x01(\v25.buildbarn.configuration.auth.AuthorizerConfigurationR\x15synchronizeAuthorizer\x12]\n" +
+	"\x1dconfiguration_reload_interval\x18\x19 \x01(\v2\x19.google.protobuf.DurationR\x1bconfigurationReloadInterval\x12e\n" +
+	"\x15handover_grpc_servers\x18\x1a \x03(\v21.buildbarn.configuration.grpc.ServerConfigurationR\x13handoverGrpcServers\x12`\n" +
+	"\vcoordinator\x18\x1b \x01(\v2>.buildbarn.configuration.bb_scheduler.CoordinatorConfigurationR\vcoordinatorJ\x04\b\x02\x10\x03J\x04\b\t\x10\n" +
 	"J\x04\b\n" +
-	"\x10\vJ\x04\b\r\x10\x0eJ\x04\b\x0e\x10\x0fJ\x04\b\x18\x10\x19\"\xea\x03\n" +
+	"\x10\vJ\x04\b\r\x10\x0eJ\x04\b\x0e\x10\x0fJ\x04\b\x18\x10\x19\"\x9e\x05\n" +
+	"\x18CoordinatorConfiguration\x12I\n" +
+	"\x06client\x18\x01 \x01(\v21.buildbarn.configuration.grpc.ClientConfigurationR\x06client\x12\x17\n" +
+	"\aself_id\x18\x02 \x01(\tR\x06selfId\x120\n" +
+	"\x14self_client_endpoint\x18\x03 \x01(\tR\x12selfClientEndpoint\x120\n" +
+	"\x14self_worker_endpoint\x18\x04 \x01(\tR\x12selfWorkerEndpoint\x12.\n" +
+	"\x13self_state_endpoint\x18\x05 \x01(\tR\x11selfStateEndpoint\x124\n" +
+	"\x16self_handover_endpoint\x18\x06 \x01(\tR\x14selfHandoverEndpoint\x12c\n" +
+	"\x14peer_client_template\x18\a \x01(\v21.buildbarn.configuration.grpc.ClientConfigurationR\x12peerClientTemplate\x12B\n" +
+	"\x0fadoption_window\x18\b \x01(\v2\x19.google.protobuf.DurationR\x0eadoptionWindow\x12b\n" +
+	" recovered_operation_grace_period\x18\t \x01(\v2\x19.google.protobuf.DurationR\x1drecoveredOperationGracePeriod\x12G\n" +
+	"\x12relay_drain_period\x18\n" +
+	" \x01(\v2\x19.google.protobuf.DurationR\x10relayDrainPeriod\"\xea\x03\n" +
 	"%PredeclaredPlatformQueueConfiguration\x120\n" +
 	"\x14instance_name_prefix\x18\x01 \x01(\tR\x12instanceNamePrefix\x12E\n" +
 	"\bplatform\x18\x02 \x01(\v2).build.bazel.remote.execution.v2.PlatformR\bplatform\x12!\n" +
@@ -330,42 +485,52 @@ func file_github_com_buildbarn_bb_remote_execution_pkg_proto_configuration_bb_sc
 	return file_github_com_buildbarn_bb_remote_execution_pkg_proto_configuration_bb_scheduler_bb_scheduler_proto_rawDescData
 }
 
-var file_github_com_buildbarn_bb_remote_execution_pkg_proto_configuration_bb_scheduler_bb_scheduler_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_github_com_buildbarn_bb_remote_execution_pkg_proto_configuration_bb_scheduler_bb_scheduler_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
 var file_github_com_buildbarn_bb_remote_execution_pkg_proto_configuration_bb_scheduler_bb_scheduler_proto_goTypes = []any{
 	(*ApplicationConfiguration)(nil),                         // 0: buildbarn.configuration.bb_scheduler.ApplicationConfiguration
-	(*PredeclaredPlatformQueueConfiguration)(nil),            // 1: buildbarn.configuration.bb_scheduler.PredeclaredPlatformQueueConfiguration
-	(*server.Configuration)(nil),                             // 2: buildbarn.configuration.http.server.Configuration
-	(*grpc.ServerConfiguration)(nil),                         // 3: buildbarn.configuration.grpc.ServerConfiguration
-	(*blobstore.ContentAddressableStorageConfiguration)(nil), // 4: buildbarn.configuration.blobstore.ContentAddressableStorageConfiguration
-	(*global.Configuration)(nil),                             // 5: buildbarn.configuration.global.Configuration
-	(*auth.AuthorizerConfiguration)(nil),                     // 6: buildbarn.configuration.auth.AuthorizerConfiguration
-	(*scheduler.ActionRouterConfiguration)(nil),              // 7: buildbarn.configuration.scheduler.ActionRouterConfiguration
-	(*blobstore.BlobAccessConfiguration)(nil),                // 8: buildbarn.configuration.blobstore.BlobAccessConfiguration
-	(*durationpb.Duration)(nil),                              // 9: google.protobuf.Duration
-	(*v2.Platform)(nil),                                      // 10: build.bazel.remote.execution.v2.Platform
+	(*CoordinatorConfiguration)(nil),                         // 1: buildbarn.configuration.bb_scheduler.CoordinatorConfiguration
+	(*PredeclaredPlatformQueueConfiguration)(nil),            // 2: buildbarn.configuration.bb_scheduler.PredeclaredPlatformQueueConfiguration
+	(*server.Configuration)(nil),                             // 3: buildbarn.configuration.http.server.Configuration
+	(*grpc.ServerConfiguration)(nil),                         // 4: buildbarn.configuration.grpc.ServerConfiguration
+	(*blobstore.ContentAddressableStorageConfiguration)(nil), // 5: buildbarn.configuration.blobstore.ContentAddressableStorageConfiguration
+	(*global.Configuration)(nil),                             // 6: buildbarn.configuration.global.Configuration
+	(*auth.AuthorizerConfiguration)(nil),                     // 7: buildbarn.configuration.auth.AuthorizerConfiguration
+	(*scheduler.ActionRouterConfiguration)(nil),              // 8: buildbarn.configuration.scheduler.ActionRouterConfiguration
+	(*blobstore.BlobAccessConfiguration)(nil),                // 9: buildbarn.configuration.blobstore.BlobAccessConfiguration
+	(*durationpb.Duration)(nil),                              // 10: google.protobuf.Duration
+	(*grpc.ClientConfiguration)(nil),                         // 11: buildbarn.configuration.grpc.ClientConfiguration
+	(*v2.Platform)(nil),                                      // 12: build.bazel.remote.execution.v2.Platform
 }
 var file_github_com_buildbarn_bb_remote_execution_pkg_proto_configuration_bb_scheduler_bb_scheduler_proto_depIdxs = []int32{
-	2,  // 0: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.deprecated_admin_http_servers:type_name -> buildbarn.configuration.http.server.Configuration
-	3,  // 1: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.client_grpc_servers:type_name -> buildbarn.configuration.grpc.ServerConfiguration
-	3,  // 2: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.worker_grpc_servers:type_name -> buildbarn.configuration.grpc.ServerConfiguration
-	4,  // 3: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.content_addressable_storage:type_name -> buildbarn.configuration.blobstore.ContentAddressableStorageConfiguration
-	5,  // 4: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.global:type_name -> buildbarn.configuration.global.Configuration
-	3,  // 5: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.build_queue_state_grpc_servers:type_name -> buildbarn.configuration.grpc.ServerConfiguration
-	1,  // 6: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.predeclared_platform_queues:type_name -> buildbarn.configuration.bb_scheduler.PredeclaredPlatformQueueConfiguration
-	6,  // 7: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.execute_authorizer:type_name -> buildbarn.configuration.auth.AuthorizerConfiguration
-	7,  // 8: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.action_router:type_name -> buildbarn.configuration.scheduler.ActionRouterConfiguration
-	8,  // 9: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.initial_size_class_cache:type_name -> buildbarn.configuration.blobstore.BlobAccessConfiguration
-	9,  // 10: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.platform_queue_with_no_workers_timeout:type_name -> google.protobuf.Duration
-	6,  // 11: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.modify_drains_authorizer:type_name -> buildbarn.configuration.auth.AuthorizerConfiguration
-	6,  // 12: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.kill_operations_authorizer:type_name -> buildbarn.configuration.auth.AuthorizerConfiguration
-	6,  // 13: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.synchronize_authorizer:type_name -> buildbarn.configuration.auth.AuthorizerConfiguration
-	10, // 14: buildbarn.configuration.bb_scheduler.PredeclaredPlatformQueueConfiguration.platform:type_name -> build.bazel.remote.execution.v2.Platform
-	9,  // 15: buildbarn.configuration.bb_scheduler.PredeclaredPlatformQueueConfiguration.worker_invocation_stickiness_limits:type_name -> google.protobuf.Duration
-	16, // [16:16] is the sub-list for method output_type
-	16, // [16:16] is the sub-list for method input_type
-	16, // [16:16] is the sub-list for extension type_name
-	16, // [16:16] is the sub-list for extension extendee
-	0,  // [0:16] is the sub-list for field type_name
+	3,  // 0: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.deprecated_admin_http_servers:type_name -> buildbarn.configuration.http.server.Configuration
+	4,  // 1: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.client_grpc_servers:type_name -> buildbarn.configuration.grpc.ServerConfiguration
+	4,  // 2: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.worker_grpc_servers:type_name -> buildbarn.configuration.grpc.ServerConfiguration
+	5,  // 3: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.content_addressable_storage:type_name -> buildbarn.configuration.blobstore.ContentAddressableStorageConfiguration
+	6,  // 4: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.global:type_name -> buildbarn.configuration.global.Configuration
+	4,  // 5: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.build_queue_state_grpc_servers:type_name -> buildbarn.configuration.grpc.ServerConfiguration
+	2,  // 6: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.predeclared_platform_queues:type_name -> buildbarn.configuration.bb_scheduler.PredeclaredPlatformQueueConfiguration
+	7,  // 7: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.execute_authorizer:type_name -> buildbarn.configuration.auth.AuthorizerConfiguration
+	8,  // 8: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.action_router:type_name -> buildbarn.configuration.scheduler.ActionRouterConfiguration
+	9,  // 9: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.initial_size_class_cache:type_name -> buildbarn.configuration.blobstore.BlobAccessConfiguration
+	10, // 10: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.platform_queue_with_no_workers_timeout:type_name -> google.protobuf.Duration
+	7,  // 11: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.modify_drains_authorizer:type_name -> buildbarn.configuration.auth.AuthorizerConfiguration
+	7,  // 12: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.kill_operations_authorizer:type_name -> buildbarn.configuration.auth.AuthorizerConfiguration
+	7,  // 13: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.synchronize_authorizer:type_name -> buildbarn.configuration.auth.AuthorizerConfiguration
+	10, // 14: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.configuration_reload_interval:type_name -> google.protobuf.Duration
+	4,  // 15: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.handover_grpc_servers:type_name -> buildbarn.configuration.grpc.ServerConfiguration
+	1,  // 16: buildbarn.configuration.bb_scheduler.ApplicationConfiguration.coordinator:type_name -> buildbarn.configuration.bb_scheduler.CoordinatorConfiguration
+	11, // 17: buildbarn.configuration.bb_scheduler.CoordinatorConfiguration.client:type_name -> buildbarn.configuration.grpc.ClientConfiguration
+	11, // 18: buildbarn.configuration.bb_scheduler.CoordinatorConfiguration.peer_client_template:type_name -> buildbarn.configuration.grpc.ClientConfiguration
+	10, // 19: buildbarn.configuration.bb_scheduler.CoordinatorConfiguration.adoption_window:type_name -> google.protobuf.Duration
+	10, // 20: buildbarn.configuration.bb_scheduler.CoordinatorConfiguration.recovered_operation_grace_period:type_name -> google.protobuf.Duration
+	10, // 21: buildbarn.configuration.bb_scheduler.CoordinatorConfiguration.relay_drain_period:type_name -> google.protobuf.Duration
+	12, // 22: buildbarn.configuration.bb_scheduler.PredeclaredPlatformQueueConfiguration.platform:type_name -> build.bazel.remote.execution.v2.Platform
+	10, // 23: buildbarn.configuration.bb_scheduler.PredeclaredPlatformQueueConfiguration.worker_invocation_stickiness_limits:type_name -> google.protobuf.Duration
+	24, // [24:24] is the sub-list for method output_type
+	24, // [24:24] is the sub-list for method input_type
+	24, // [24:24] is the sub-list for extension type_name
+	24, // [24:24] is the sub-list for extension extendee
+	0,  // [0:24] is the sub-list for field type_name
 }
 
 func init() {
@@ -381,7 +546,7 @@ func file_github_com_buildbarn_bb_remote_execution_pkg_proto_configuration_bb_sc
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_github_com_buildbarn_bb_remote_execution_pkg_proto_configuration_bb_scheduler_bb_scheduler_proto_rawDesc), len(file_github_com_buildbarn_bb_remote_execution_pkg_proto_configuration_bb_scheduler_bb_scheduler_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   2,
+			NumMessages:   3,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

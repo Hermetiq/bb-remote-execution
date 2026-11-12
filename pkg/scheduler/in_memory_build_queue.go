@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"sync"
@@ -227,6 +228,21 @@ type InMemoryBuildQueueConfiguration struct {
 	// worker may remain registered by InMemoryBuildQueue when no
 	// Synchronize() calls are received.
 	WorkerWithNoSynchronizationsTimeout time.Duration
+
+	// WorkerAdoptionTimeout specifies how long an executing worker
+	// restored from a handover snapshot may remain registered
+	// before its first Synchronize() call arrives. If this timeout
+	// expires before the worker synchronizes, its task is
+	// unassigned and re-enqueued rather than failed. When zero,
+	// defaults to 15s.
+	WorkerAdoptionTimeout time.Duration
+
+	// RecoveredOperationWithNoWaitersTimeout specifies how long an
+	// operation restored from a handover snapshot may remain
+	// registered without any waiting clients while relayed streams
+	// re-attach via WaitExecution(). When zero, defaults to
+	// OperationWithNoWaitersTimeout.
+	RecoveredOperationWithNoWaitersTimeout time.Duration
 }
 
 // InMemoryBuildQueue implements a BuildQueue that can distribute
@@ -247,6 +263,11 @@ type InMemoryBuildQueue struct {
 	platformQueuesTrie *platform.Trie
 	platformQueues     []*platformQueue
 	sizeClassQueues    map[sizeClassKey]*sizeClassQueue
+
+	// Workers executing a restored task may still report a size class that
+	// was removed by the new configuration. Route those reports to the queue
+	// holding the task until it completes or the worker disappears.
+	restoredWorkerQueues map[workerRegistrationKey]*sizeClassQueue
 
 	// Bookkeeping for WaitExecution(). This call permits us to
 	// re-attach to operations by name. It also allows us to obtain
@@ -348,6 +369,7 @@ func NewInMemoryBuildQueue(actionReader reader.Reader[*remoteexecution.Action], 
 		actionRouter:                        actionRouter,
 		platformQueuesTrie:                  platform.NewTrie(),
 		sizeClassQueues:                     map[sizeClassKey]*sizeClassQueue{},
+		restoredWorkerQueues:                map[workerRegistrationKey]*sizeClassQueue{},
 		operationsNameMap:                   map[string]*operation{},
 		inFlightDeduplicationMap:            map[digest.Digest]*task{},
 		executeAuthorizer:                   executeAuthorizer,
@@ -363,6 +385,33 @@ var (
 	_ buildqueuestate.BuildQueueStateServer = (*InMemoryBuildQueue)(nil)
 )
 
+// PredeclaredPlatformQueueParams holds the configuration parameters for
+// a single predeclared platform queue.
+type PredeclaredPlatformQueueParams struct {
+	InstanceNamePrefix                        digest.InstanceName
+	Platform                                  *remoteexecution.Platform
+	WorkerInvocationStickinessLimits          []time.Duration
+	MaximumQueuedBackgroundLearningOperations int
+	BackgroundLearningOperationPriority       int32
+	SizeClasses                               []uint32
+}
+
+func validatePredeclaredPlatformQueueParams(q PredeclaredPlatformQueueParams) (platform.Key, error) {
+	var badKey platform.Key
+	if len(q.SizeClasses) < 1 {
+		return badKey, status.Error(codes.InvalidArgument, "No size classes provided")
+	}
+	for i := 1; i < len(q.SizeClasses); i++ {
+		if q.SizeClasses[i-1] >= q.SizeClasses[i] {
+			return badKey, status.Error(codes.InvalidArgument, "Size classes must be provided in sorted order")
+		}
+	}
+	if len(q.SizeClasses) > 1 && q.SizeClasses[0] == 0 {
+		return badKey, status.Error(codes.InvalidArgument, "If multiple size classes are provided, all size classes must be positive")
+	}
+	return platform.NewKey(q.InstanceNamePrefix, q.Platform)
+}
+
 // RegisterPredeclaredPlatformQueue adds a platform queue to
 // InMemoryBuildQueue that remains present, regardless of whether
 // workers appear.
@@ -372,19 +421,14 @@ var (
 // initialsizeclass.Analyzer can be provided for specifying how
 // operations are assigned to size classes.
 func (bq *InMemoryBuildQueue) RegisterPredeclaredPlatformQueue(instanceNamePrefix digest.InstanceName, platformMessage *remoteexecution.Platform, workerInvocationStickinessLimits []time.Duration, maximumQueuedBackgroundLearningOperations int, backgroundLearningOperationPriority int32, sizeClasses []uint32) error {
-	if len(sizeClasses) < 1 {
-		return status.Error(codes.InvalidArgument, "No size classes provided")
-	}
-	for i := 1; i < len(sizeClasses); i++ {
-		if sizeClasses[i-1] >= sizeClasses[i] {
-			return status.Error(codes.InvalidArgument, "Size classes must be provided in sorted order")
-		}
-	}
-	if len(sizeClasses) > 1 && sizeClasses[0] == 0 {
-		return status.Error(codes.InvalidArgument, "If multiple size classes are provided, all size classes must be positive")
-	}
-
-	platformKey, err := platform.NewKey(instanceNamePrefix, platformMessage)
+	platformKey, err := validatePredeclaredPlatformQueueParams(PredeclaredPlatformQueueParams{
+		InstanceNamePrefix:                        instanceNamePrefix,
+		Platform:                                  platformMessage,
+		WorkerInvocationStickinessLimits:          workerInvocationStickinessLimits,
+		MaximumQueuedBackgroundLearningOperations: maximumQueuedBackgroundLearningOperations,
+		BackgroundLearningOperationPriority:       backgroundLearningOperationPriority,
+		SizeClasses:                               sizeClasses,
+	})
 	if err != nil {
 		return err
 	}
@@ -401,6 +445,163 @@ func (bq *InMemoryBuildQueue) RegisterPredeclaredPlatformQueue(instanceNamePrefi
 		pq.addSizeClassQueue(bq, sizeClass, false)
 	}
 	return nil
+}
+
+// ReconcilePredeclaredPlatformQueues reconciles the set of predeclared
+// platform queues in InMemoryBuildQueue against the desired list
+// without disturbing active workers, queued tasks, or in-flight
+// operations.
+//
+//   - Platform queues present in queues but absent from the build queue
+//     are registered as predeclared queues.
+//   - Platform queues present in queues that currently exist as
+//     dynamically registered queues are promoted to predeclared queues
+//     in place (provided their existing size classes are compatible).
+//   - Predeclared platform queues that are no longer present in queues
+//     are demoted to removable queues (`mayBeRemoved = true`) so that
+//     they age out after PlatformQueueWithNoWorkersTimeout once idle.
+//
+// Changes that cannot be applied in place (altering the size classes or
+// worker invocation stickiness limits of an existing predeclared
+// queue, or promoting a dynamic queue whose size classes are
+// incompatible) are skipped. A description of each skipped queue is
+// returned, so that the caller can report that a restart of the
+// scheduler is needed to apply them.
+//
+// The provided queues are validated before any changes are made. If
+// validation fails, an error is returned and no changes are made.
+func (bq *InMemoryBuildQueue) ReconcilePredeclaredPlatformQueues(queues []PredeclaredPlatformQueueParams) ([]string, error) {
+	type validatedQueue struct {
+		platformKey platform.Key
+		params      PredeclaredPlatformQueueParams
+	}
+	validated := make([]validatedQueue, 0, len(queues))
+	desiredKeys := make(map[platform.Key]struct{}, len(queues))
+	for _, q := range queues {
+		pk, err := validatePredeclaredPlatformQueueParams(q)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := desiredKeys[pk]; exists {
+			return nil, status.Error(codes.AlreadyExists, "A queue with the same instance name prefix or platform already exists")
+		}
+		desiredKeys[pk] = struct{}{}
+		validated = append(validated, validatedQueue{
+			platformKey: pk,
+			params:      q,
+		})
+	}
+
+	bq.enter(bq.clock.Now())
+	defer bq.leave()
+
+	var pendingRestart []string
+	for _, vq := range validated {
+		pk := vq.platformKey
+		q := vq.params
+		pqIndex := bq.platformQueuesTrie.GetExact(pk)
+		if pqIndex < 0 {
+			pq := bq.addPlatformQueue(pk, q.WorkerInvocationStickinessLimits, q.MaximumQueuedBackgroundLearningOperations, q.BackgroundLearningOperationPriority)
+			for _, sizeClass := range q.SizeClasses {
+				pq.addSizeClassQueue(bq, sizeClass, false)
+			}
+			continue
+		}
+
+		pq := bq.platformQueues[pqIndex]
+		wasPredeclared := len(pq.sizeClassQueues) > 0 && !pq.sizeClassQueues[len(pq.sizeClassQueues)-1].mayBeRemoved
+		if wasPredeclared {
+			predeclaredSizeClasses := make([]uint32, 0, len(pq.sizeClassQueues))
+			for _, scq := range pq.sizeClassQueues {
+				if !scq.mayBeRemoved {
+					predeclaredSizeClasses = append(predeclaredSizeClasses, scq.sizeClass)
+				}
+			}
+			if !slices.Equal(predeclaredSizeClasses, q.SizeClasses) || !slices.Equal(pq.workerInvocationStickinessLimits, q.WorkerInvocationStickinessLimits) {
+				pendingRestart = append(pendingRestart, fmt.Sprintf(
+					"Predeclared platform queue (%#v, %s) has size classes %v and worker invocation stickiness limits %v, while the configuration requests %v and %v",
+					pk.GetInstanceNamePrefix().String(),
+					pk.GetPlatformString(),
+					predeclaredSizeClasses,
+					pq.workerInvocationStickinessLimits,
+					q.SizeClasses,
+					q.WorkerInvocationStickinessLimits,
+				))
+				continue
+			}
+			pq.maximumQueuedBackgroundLearningOperations = q.MaximumQueuedBackgroundLearningOperations
+			pq.backgroundLearningOperationPriority = q.BackgroundLearningOperationPriority
+			continue
+		}
+
+		// Promote a dynamically registered platform queue in place if compatible.
+		maxSizeClass := q.SizeClasses[len(q.SizeClasses)-1]
+		compatible := true
+		for _, scq := range pq.sizeClassQueues {
+			if scq.sizeClass > maxSizeClass || (maxSizeClass > 0 && scq.sizeClass == 0) {
+				compatible = false
+				break
+			}
+		}
+		if !compatible {
+			pendingRestart = append(pendingRestart, fmt.Sprintf(
+				"Dynamic platform queue (%#v, %s) has size classes %v, which cannot be promoted to predeclared size classes %v in place",
+				pk.GetInstanceNamePrefix().String(),
+				pk.GetPlatformString(),
+				pq.sizeClasses,
+				q.SizeClasses,
+			))
+			continue
+		}
+
+		pq.workerInvocationStickinessLimits = q.WorkerInvocationStickinessLimits
+		pq.maximumQueuedBackgroundLearningOperations = q.MaximumQueuedBackgroundLearningOperations
+		pq.backgroundLearningOperationPriority = q.BackgroundLearningOperationPriority
+		for _, scq := range pq.sizeClassQueues {
+			for _, w := range scq.workers {
+				if len(w.stickinessStartingTimes) < len(q.WorkerInvocationStickinessLimits) {
+					newTimes := make([]time.Time, len(q.WorkerInvocationStickinessLimits))
+					copy(newTimes, w.stickinessStartingTimes)
+					w.stickinessStartingTimes = newTimes
+				} else if len(w.stickinessStartingTimes) > len(q.WorkerInvocationStickinessLimits) {
+					w.stickinessStartingTimes = w.stickinessStartingTimes[:len(q.WorkerInvocationStickinessLimits)]
+				}
+			}
+		}
+		for _, sizeClass := range q.SizeClasses {
+			scKey := sizeClassKey{
+				platformKey: pk,
+				sizeClass:   sizeClass,
+			}
+			if scq, ok := bq.sizeClassQueues[scKey]; ok {
+				scq.mayBeRemoved = false
+				if scq.cleanupKey.isActive() {
+					bq.cleanupQueue.remove(scq.cleanupKey)
+				}
+			} else {
+				pq.addSizeClassQueue(bq, sizeClass, false)
+			}
+		}
+	}
+
+	// Demote predeclared queues that are no longer present in the desired set.
+	for _, pq := range bq.platformQueues {
+		if _, ok := desiredKeys[pq.platformKey]; ok {
+			continue
+		}
+		for _, scq := range pq.sizeClassQueues {
+			if !scq.mayBeRemoved {
+				scq.mayBeRemoved = true
+				if len(scq.workers) == 0 && !scq.cleanupKey.isActive() {
+					scqToRemove := scq
+					bq.cleanupQueue.add(&scqToRemove.cleanupKey, bq.now.Add(bq.configuration.PlatformQueueWithNoWorkersTimeout), func() {
+						scqToRemove.remove(bq)
+					})
+				}
+			}
+		}
+	}
+	return pendingRestart, nil
 }
 
 // getRequestMetadata extracts the RequestMetadata message stored in the
@@ -630,6 +831,9 @@ func (bq *InMemoryBuildQueue) Synchronize(ctx context.Context, request *remotewo
 	}
 	var pq *platformQueue
 	scq, ok := bq.sizeClassQueues[sizeClassKey]
+	if restoredSCQ, restored := bq.restoredWorkerQueues[workerRegistrationKey{sizeClassKey, workerKey}]; restored {
+		scq, ok = restoredSCQ, true
+	}
 	if ok {
 		// Found an existing size class queue. Prevent the
 		// platform queue from being garbage collected, as it
@@ -667,22 +871,41 @@ func (bq *InMemoryBuildQueue) Synchronize(ctx context.Context, request *remotewo
 
 	w, ok := scq.workers[workerKey]
 	if ok {
+		if w.synchronizationSizeClass != request.SizeClass {
+			return nil, status.Error(codes.FailedPrecondition, "A worker with the same worker ID is still executing a restored task in another size class")
+		}
 		// Prevent the worker from being garbage collected while
 		// synchronization is happening.
 		if !w.cleanupKey.isActive() {
 			return nil, status.Error(codes.ResourceExhausted, "A worker with the same worker ID is already synchronizing with the scheduler")
 		}
 		bq.cleanupQueue.remove(w.cleanupKey)
+		if w.unadopted {
+			w.unadopted = false
+			adopted := false
+			if currentState := request.CurrentState; currentState != nil {
+				if executing, ok := currentState.WorkerState.(*remoteworker.CurrentState_Executing_); ok &&
+					executing.Executing != nil &&
+					executing.Executing.ActionDigest != nil &&
+					w.isRunningCorrectTask(executing.Executing.ActionDigest) {
+					adopted = true
+				}
+			}
+			if !adopted {
+				w.unassignUnadoptedTask(bq, scq)
+			}
+		}
 	} else {
 		// First time we're seeing this worker. As this worker
 		// has never run an action before (that we know about),
 		// associate it with the root invocation.
 		i := &scq.rootInvocation
 		w = &worker{
-			workerKey:               workerKey,
-			lastInvocation:          i,
-			listIndex:               -1,
-			stickinessStartingTimes: make([]time.Time, len(pq.workerInvocationStickinessLimits)),
+			workerKey:                workerKey,
+			synchronizationSizeClass: request.SizeClass,
+			lastInvocation:           i,
+			listIndex:                -1,
+			stickinessStartingTimes:  make([]time.Time, len(pq.workerInvocationStickinessLimits)),
 		}
 		i.idleWorkersCount++
 		scq.workers[workerKey] = w
@@ -692,6 +915,19 @@ func (bq *InMemoryBuildQueue) Synchronize(ctx context.Context, request *remotewo
 	// Install cleanup handlers to ensure stale workers and queues
 	// are purged after sufficient amount of time.
 	defer func() {
+		// A worker registered in a removed size class may finish its old
+		// action, but must not receive work from a differently sized queue.
+		if w.synchronizationSizeClass != scq.sizeClass && w.currentTask == nil {
+			w.clearLastInvocation()
+			delete(scq.workers, workerKey)
+			delete(bq.restoredWorkerQueues, workerRegistrationKey{sizeClassKey, workerKey})
+			if len(scq.workers) == 0 && scq.mayBeRemoved && !scq.cleanupKey.isActive() {
+				bq.cleanupQueue.add(&scq.cleanupKey, bq.now.Add(bq.configuration.PlatformQueueWithNoWorkersTimeout), func() {
+					scq.remove(bq)
+				})
+			}
+			return
+		}
 		removalTime := bq.now.Add(bq.configuration.WorkerWithNoSynchronizationsTimeout)
 		bq.cleanupQueue.add(&w.cleanupKey, removalTime, func() {
 			scq.removeStaleWorker(bq, workerKey, removalTime)
@@ -704,9 +940,10 @@ func (bq *InMemoryBuildQueue) Synchronize(ctx context.Context, request *remotewo
 	if currentState == nil {
 		return nil, status.Error(codes.InvalidArgument, "Worker did not provide its current state")
 	}
+	preferBeingIdle := request.PreferBeingIdle || w.synchronizationSizeClass != scq.sizeClass
 	switch workerState := currentState.WorkerState.(type) {
 	case *remoteworker.CurrentState_Idle:
-		return w.getCurrentOrNextTask(ctx, bq, scq, request.WorkerId, request.PreferBeingIdle)
+		return w.getCurrentOrNextTask(ctx, bq, scq, request.WorkerId, preferBeingIdle)
 	case *remoteworker.CurrentState_Executing_:
 		executing := workerState.Executing
 		if executing.ActionDigest == nil {
@@ -714,9 +951,9 @@ func (bq *InMemoryBuildQueue) Synchronize(ctx context.Context, request *remotewo
 		}
 		switch executionState := executing.ExecutionState.(type) {
 		case *remoteworker.CurrentState_Executing_Completed:
-			return w.completeTask(ctx, bq, scq, request.WorkerId, executing.ActionDigest, executionState.Completed, request.PreferBeingIdle)
+			return w.completeTask(ctx, bq, scq, request.WorkerId, executing.ActionDigest, executionState.Completed, preferBeingIdle)
 		default:
-			return w.updateTask(bq, scq, request.WorkerId, executing.ActionDigest, request.PreferBeingIdle)
+			return w.updateTask(bq, scq, request.WorkerId, executing.ActionDigest, preferBeingIdle)
 		}
 	default:
 		return nil, status.Error(codes.InvalidArgument, "Worker provided an unknown current state")
@@ -1308,6 +1545,13 @@ func (bq *InMemoryBuildQueue) ForceCleanup() {
 	bq.leave()
 }
 
+// Ping acquires and releases the build queue lock to verify that the
+// scheduler's main loop is responsive.
+func (bq *InMemoryBuildQueue) Ping() {
+	bq.enter(bq.clock.Now())
+	bq.leave()
+}
+
 // getIdleSynchronizeResponse returns a synchronization response that
 // explicitly instructs a worker to return to the idle state.
 func (bq *InMemoryBuildQueue) getIdleSynchronizeResponse() *remoteworker.SynchronizeResponse {
@@ -1371,6 +1615,11 @@ func newPlatformKeyFromName(name *buildqueuestate.PlatformQueueName) (platform.K
 type sizeClassKey struct {
 	platformKey platform.Key
 	sizeClass   uint32
+}
+
+type workerRegistrationKey struct {
+	sizeClassKey sizeClassKey
+	workerKey    workerKey
 }
 
 func newSizeClassKeyFromName(name *buildqueuestate.SizeClassQueueName) (sizeClassKey, error) {
@@ -1599,6 +1848,8 @@ func (scq *sizeClassQueue) removeStaleWorker(bq *InMemoryBuildQueue, workerKey w
 	scq.markWorkerTerminating(w)
 	if t := w.currentTask; t == nil {
 		scq.workersRemovedIdleTotal.Inc()
+	} else if w.unadopted {
+		w.unassignUnadoptedTask(bq, scq)
 	} else {
 		scq.workersRemovedExecutingTotal.Inc()
 		t.complete(bq, &remoteexecution.ExecuteResponse{
@@ -1607,6 +1858,10 @@ func (scq *sizeClassQueue) removeStaleWorker(bq *InMemoryBuildQueue, workerKey w
 	}
 	w.clearLastInvocation()
 	delete(scq.workers, workerKey)
+	delete(bq.restoredWorkerQueues, workerRegistrationKey{
+		sizeClassKey{platformKey: scq.platformQueue.platformKey, sizeClass: w.synchronizationSizeClass},
+		workerKey,
+	})
 
 	// Trigger platform queue removal if necessary.
 	if len(scq.workers) == 0 && scq.mayBeRemoved {
@@ -2706,6 +2961,9 @@ func (t *task) getCurrentSizeClassQueue() *sizeClassQueue {
 // worker state for every node capable of executing operations.
 type worker struct {
 	workerKey workerKey
+	// Size class used by this worker's Synchronize requests. During a
+	// handover this may differ from the queue holding its restored task.
+	synchronizationSizeClass uint32
 
 	// The task that this worker is currently executing. This field
 	// must be kept in sync with task.currentWorker.
@@ -2742,6 +3000,44 @@ type worker struct {
 	// current invocation. These values are used to determine
 	// whether the stickiness limit has been reached.
 	stickinessStartingTimes []time.Time
+	// When true, this worker entry was reconstructed during state
+	// restore for an in-flight executing task and is awaiting the
+	// worker's first Synchronize() call within WorkerAdoptionTimeout.
+	unadopted bool
+}
+
+func (w *worker) unassignUnadoptedTask(bq *InMemoryBuildQueue, scq *sizeClassQueue) {
+	t := w.currentTask
+	w.unadopted = false
+	if t == nil {
+		return
+	}
+	w.setLastInvocation(&scq.rootInvocation)
+	for i := range t.operations {
+		i.decrementExecutingWorkersCount(bq, w)
+	}
+	w.currentTask = nil
+	t.currentWorker = nil
+	if w.synchronizationSizeClass != scq.sizeClass && scq == scq.platformQueue.sizeClassQueues[len(scq.platformQueue.sizeClassQueues)-1] {
+		if learner, ok := t.initialSizeClassLearner.(*restoredLearner); ok && learner.onSmallerSizeClass {
+			// The restored task was moved to the largest configured queue.
+			// Once its old worker is lost, use the full fallback timeout for
+			// execution there instead of repeating the exploratory timeout.
+			t.expectedDuration = learner.expectedDuration
+			t.desiredState.Action.Timeout = durationpb.New(learner.timeout)
+			learner.onSmallerSizeClass = false
+		}
+	}
+
+	operations := t.operations
+	t.operations = make(map[*invocation]*operation, len(operations))
+	for oldI, o := range operations {
+		i := scq.getOrCreateInvocation(bq, oldI.invocationKeys)
+		t.operations[i] = o
+		o.invocation = i
+	}
+	t.schedule(bq)
+	t.reportNonFinalStageChange()
 }
 
 func workerMatchesPattern(workerID, workerIDPattern map[string]string) bool {

@@ -1,0 +1,49 @@
+# bb-remote-execution (Hermetiq fork) — Buildkite pipeline.
+#
+# Uploaded by the `bb-remote-execution` pipeline's `buildkite-agent pipeline
+# upload` bootstrap. Upstream's GitHub Actions workflows still exist in
+# .github/, but they publish to ghcr.io/buildbarn, which this fork can't write
+# to; this pipeline is what publishes Hermetiq's images.
+#
+# Every non-tag build runs the tests. A merge to main also builds the
+# bb-scheduler image and pushes it to the PRIVATE registry as
+#   us-central1-docker.pkg.dev/hermetiq-cloud/cloud/bb-scheduler:<tag>
+# where <tag> has upstream's YYYYMMDDThhmmssZ-<commit> form (see
+# hermetiq/BUILD.bazel).
+#
+# The pipeline slug MUST be `bb-remote-execution`: the WIF provider only lets
+# main-branch builds of that slug impersonate bk-bb-remote-execution
+# (cloud-native/pulumi-iac/buildkite-oidc).
+
+agents:
+  queue: "linux-medium"
+
+steps:
+  - label: ":bazel: test"
+    key: "test"
+    if: build.tag == null
+    command: "bash .buildkite/scripts/bazel.sh test --test_output=errors //..."
+    timeout_in_minutes: 90
+    cache:
+      name: "bb-remote-execution-bazel"
+      size: "50g"
+      paths:
+        - ".bkcache"
+
+  - label: ":docker: publish bb-scheduler (main)"
+    key: "publish-scheduler-image"
+    if: build.branch == "main" && build.pull_request.id == null && build.tag == null
+    depends_on: "test"
+    command: "bash .buildkite/scripts/publish-scheduler-image.sh"
+    concurrency: 1
+    concurrency_group: "bb-remote-execution/publish"
+    timeout_in_minutes: 60
+    cache:
+      name: "bb-remote-execution-bazel"
+      size: "50g"
+      paths:
+        - ".bkcache"
+    plugins:
+      - gcp-workload-identity-federation#v1.5.0:
+          audience: "//iam.googleapis.com/projects/896176954734/locations/global/workloadIdentityPools/buildkite/providers/buildkite-oidc"
+          service-account: "bk-bb-remote-execution@hermetiq-cloud.iam.gserviceaccount.com"

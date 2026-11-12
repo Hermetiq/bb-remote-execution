@@ -1,0 +1,24 @@
+load("@rules_img//img:push.bzl", "image_push")
+
+# Hermetiq-specific build targets for this fork of bb-remote-execution.
+# They live in this directory so that merges from upstream don't conflict
+# with them. See README.md.
+
+# Pushes the bb_scheduler image to Hermetiq's private Artifact Registry
+# repository. Upstream's //cmd/bb_scheduler:bb_scheduler_container_push
+# pushes to ghcr.io/buildbarn instead, which this fork can't write to.
+#
+# The tag has the same YYYYMMDDThhmmssZ-<commit> form as upstream's images.
+# It is derived from the checked out commit by tools/workspace-status.sh,
+# so the push must be run with --stamp on CI (GITHUB_ACTIONS or BUILDKITE
+# set). Without stamping, the tag falls back to "0.0.0".
+image_push(
+    name = "bb_scheduler_container_push",
+    image = "//cmd/bb_scheduler:bb_scheduler_container",
+    registry = "us-central1-docker.pkg.dev",
+    repository = "hermetiq-cloud/cloud/bb-scheduler",
+    tag_file = "@com_github_buildbarn_bb_storage//tools:stamped_tags",
+    # Don't build container image unless explicitly requested, as
+    # building all variants can be time-consuming.
+    tags = ["manual"],
+)

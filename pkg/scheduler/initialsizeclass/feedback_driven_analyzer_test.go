@@ -99,6 +99,10 @@ func TestFeedbackDrivenAnalyzer(t *testing.T) {
 		require.Equal(t, 0, sizeClassIndex)
 		require.Equal(t, 15*time.Second, expectedDuration)
 		require.Equal(t, 15*time.Second, timeout)
+		fallbackDuration, fallbackTimeout, retry := learner.(initialsizeclass.FallbackExecutionParametersProvider).GetFallbackExecutionParameters()
+		require.True(t, retry)
+		require.Equal(t, 30*time.Minute, fallbackDuration)
+		require.Equal(t, 30*time.Minute, fallbackTimeout)
 
 		// Action didn't get run after all.
 		handle.EXPECT().Release(false)

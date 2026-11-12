@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package buildbarn.schedulerstate;
+
+import "build/bazel/remote/execution/v2/remote_execution.proto";
+import "github.com/buildbarn/bb-remote-execution/pkg/proto/buildqueuestate/buildqueuestate.proto";
+import "github.com/buildbarn/bb-remote-execution/pkg/proto/remoteworker/remoteworker.proto";
+import "google/protobuf/any.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/buildbarn/bb-remote-execution/pkg/proto/schedulerstate";
+
+// Snapshot captures the point-in-time scheduler state of an
+// InMemoryBuildQueue so that it can be transferred to a successor
+// scheduler instance during a coordinated handover.
+message Snapshot {
+  repeated PlatformQueueSnapshot platform_queues = 1;
+
+  // Timestamp after which unknown platform queues fail with
+  // FAILED_PRECONDITION rather than UNAVAILABLE.
+  google.protobuf.Timestamp platform_queue_absence_hard_failure_time = 2;
+}
+
+message PlatformQueueSnapshot {
+  string instance_name_prefix = 1;
+  build.bazel.remote.execution.v2.Platform platform = 2;
+  repeated SizeClassQueueSnapshot size_class_queues = 3;
+}
+
+message SizeClassQueueSnapshot {
+  uint32 size_class = 1;
+  bool may_be_removed = 2;
+  repeated TaskSnapshot tasks = 3;
+  repeated buildbarn.buildqueuestate.DrainState drains = 4;
+}
+
+message TaskSnapshot {
+  // The full instance name of the task's actionDigest. Stored explicitly
+  // because desired_state.action may be nil for COMPLETED tasks.
+  string instance_name = 1;
+
+  // Desired execution state sent to workers.
+  buildbarn.remoteworker.DesiredState.Executing desired_state = 2;
+
+  string target_id = 3;
+  google.protobuf.Timestamp current_stage_start_time = 4;
+  int32 retry_count = 5;
+  google.protobuf.Duration expected_duration = 6;
+  bool may_exist_without_waiters = 7;
+
+  build.bazel.remote.execution.v2.ExecutionStage.Value stage = 8;
+
+  // Present when stage == EXECUTING: the worker ID that was executing
+  // the task at snapshot time.
+  map<string, string> executing_worker_id = 9;
+
+  // Present when stage == COMPLETED: the final execution response.
+  build.bazel.remote.execution.v2.ExecuteResponse execute_response = 10;
+
+  repeated OperationSnapshot operations = 11;
+
+  // Preserve the original execution parameters for fallback to the largest
+  // size class. The current action timeout may be a shorter exploratory limit.
+  google.protobuf.Duration fallback_expected_duration = 12;
+  google.protobuf.Duration fallback_execution_timeout = 13;
+  optional bool retry_on_largest_size_class = 14;
+
+  // The worker may still be executing in a size class removed by the successor's
+  // configuration. Keep its registration address across subsequent handovers.
+  optional uint32 executing_worker_size_class = 15;
+}
+
+message OperationSnapshot {
+  string name = 1;
+  int32 priority = 2;
+  repeated google.protobuf.Any invocation_ids = 3;
+  bool may_exist_without_waiters = 4;
+}

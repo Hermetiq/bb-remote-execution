@@ -182,6 +182,10 @@ type baseLearner struct {
 	handle   PreviousExecutionStatsHandle
 }
 
+func (*baseLearner) GetFallbackExecutionParameters() (time.Duration, time.Duration, bool) {
+	return 0, 0, false
+}
+
 func (l *baseLearner) addPreviousExecution(sizeClass uint32, previousExecution *iscc.PreviousExecution) {
 	perSizeClassStatsMap := l.handle.GetMutableProto().SizeClasses
 	perSizeClassStats, ok := perSizeClassStatsMap[sizeClass]
@@ -226,6 +230,10 @@ type smallerForegroundLearner struct {
 	smallerTimeout   time.Duration
 	largestSizeClass uint32
 	largestTimeout   time.Duration
+}
+
+func (l *smallerForegroundLearner) GetFallbackExecutionParameters() (time.Duration, time.Duration, bool) {
+	return getExpectedExecutionDuration(l.handle.GetMutableProto().SizeClasses, l.largestSizeClass, l.largestTimeout), l.largestTimeout, true
 }
 
 func (l *smallerForegroundLearner) Succeeded(duration time.Duration, sizeClasses []uint32) (int, time.Duration, time.Duration, Learner) {

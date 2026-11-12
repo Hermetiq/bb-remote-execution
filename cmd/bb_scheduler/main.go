@@ -13,12 +13,16 @@ import (
 	re_cas "github.com/buildbarn/bb-remote-execution/pkg/cas"
 	"github.com/buildbarn/bb-remote-execution/pkg/proto/buildqueuestate"
 	"github.com/buildbarn/bb-remote-execution/pkg/proto/configuration/bb_scheduler"
+	scheduler_pb "github.com/buildbarn/bb-remote-execution/pkg/proto/configuration/scheduler"
+	"github.com/buildbarn/bb-remote-execution/pkg/proto/coordinator"
 	"github.com/buildbarn/bb-remote-execution/pkg/proto/remoteworker"
+	"github.com/buildbarn/bb-remote-execution/pkg/proto/schedulerhandover"
 	"github.com/buildbarn/bb-remote-execution/pkg/scheduler"
 	"github.com/buildbarn/bb-remote-execution/pkg/scheduler/initialsizeclass"
 	"github.com/buildbarn/bb-remote-execution/pkg/scheduler/routing"
 	auth_configuration "github.com/buildbarn/bb-storage/pkg/auth/configuration"
 	blobstore_configuration "github.com/buildbarn/bb-storage/pkg/blobstore/configuration"
+	"github.com/buildbarn/bb-storage/pkg/builder"
 	"github.com/buildbarn/bb-storage/pkg/capabilities"
 	"github.com/buildbarn/bb-storage/pkg/cas"
 	"github.com/buildbarn/bb-storage/pkg/clock"
@@ -27,6 +31,7 @@ import (
 	bb_grpc "github.com/buildbarn/bb-storage/pkg/grpc"
 	http_server "github.com/buildbarn/bb-storage/pkg/http/server"
 	"github.com/buildbarn/bb-storage/pkg/program"
+	grpc_configuration "github.com/buildbarn/bb-storage/pkg/proto/configuration/grpc"
 	"github.com/buildbarn/bb-storage/pkg/proto/iscc"
 	"github.com/buildbarn/bb-storage/pkg/random"
 	"github.com/buildbarn/bb-storage/pkg/util"
@@ -36,6 +41,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 func main() {
@@ -46,6 +52,9 @@ func main() {
 		var configuration bb_scheduler.ApplicationConfiguration
 		if err := util.UnmarshalConfigurationFromFile(os.Args[1], &configuration); err != nil {
 			return util.StatusWrapf(err, "Failed to read configuration from %s", os.Args[1])
+		}
+		if (configuration.Coordinator != nil) != (len(configuration.HandoverGrpcServers) > 0) {
+			return status.Error(codes.InvalidArgument, "Coordinator and handover gRPC servers must be configured together")
 		}
 		lifecycleState, grpcClientFactory, err := global.ApplyConfiguration(configuration.Global, dependenciesGroup)
 		if err != nil {
@@ -94,11 +103,13 @@ func main() {
 
 		// Create an action router that is responsible for analyzing
 		// incoming execution requests and determining how they are
-		// scheduled.
-		actionRouter, err := routing.NewActionRouterFromConfiguration(configuration.ActionRouter, previousExecutionStatsStore, grpcClientFactory, dependenciesGroup)
+		// scheduled. It may be replaced at runtime when the
+		// configuration file is reloaded.
+		initialActionRouter, err := routing.NewActionRouterFromConfiguration(configuration.ActionRouter, previousExecutionStatsStore, grpcClientFactory, dependenciesGroup)
 		if err != nil {
 			return util.StatusWrap(err, "Failed to create action router")
 		}
+		actionRouter := routing.NewReloadableActionRouter(initialActionRouter)
 
 		authorizerFactory := auth_configuration.DefaultAuthorizerFactory
 		executeAuthorizer, err := authorizerFactory.NewAuthorizerFromConfiguration(configuration.ExecuteAuthorizer, dependenciesGroup, grpcClientFactory)
@@ -123,6 +134,28 @@ func main() {
 			return util.StatusWrap(err, "Invalid platform queue with no workers timeout")
 		}
 
+		var adoptionWindow, recoveredGracePeriod, relayDrainPeriod time.Duration
+		if coordCfg := configuration.Coordinator; coordCfg != nil {
+			if coordCfg.AdoptionWindow != nil {
+				if err := coordCfg.AdoptionWindow.CheckValid(); err != nil {
+					return util.StatusWrap(err, "Invalid coordinator adoption window")
+				}
+				adoptionWindow = coordCfg.AdoptionWindow.AsDuration()
+			}
+			if coordCfg.RecoveredOperationGracePeriod != nil {
+				if err := coordCfg.RecoveredOperationGracePeriod.CheckValid(); err != nil {
+					return util.StatusWrap(err, "Invalid coordinator recovered operation grace period")
+				}
+				recoveredGracePeriod = coordCfg.RecoveredOperationGracePeriod.AsDuration()
+			}
+			if coordCfg.RelayDrainPeriod != nil {
+				if err := coordCfg.RelayDrainPeriod.CheckValid(); err != nil {
+					return util.StatusWrap(err, "Invalid coordinator relay drain period")
+				}
+				relayDrainPeriod = coordCfg.RelayDrainPeriod.AsDuration()
+			}
+		}
+
 		// Create in-memory build queue.
 		// TODO: Make timeouts configurable.
 		generator := random.NewFastSingleThreadedGenerator()
@@ -144,8 +177,10 @@ func main() {
 					// prevent recurring traffic spikes.
 					return random.Duration(generator, 2*time.Minute)
 				},
-				WorkerTaskRetryCount:                9,
-				WorkerWithNoSynchronizationsTimeout: time.Minute,
+				WorkerTaskRetryCount:                   9,
+				WorkerWithNoSynchronizationsTimeout:    time.Minute,
+				WorkerAdoptionTimeout:                  adoptionWindow,
+				RecoveredOperationWithNoWaitersTimeout: recoveredGracePeriod,
 			},
 			actionRouter,
 			executeAuthorizer,
@@ -153,6 +188,40 @@ func main() {
 			killOperationsAuthorizer,
 			synchronizeAuthorizer,
 		)
+
+		var clientBuildQueue builder.BuildQueue = buildQueue
+		var workerQueueServer remoteworker.OperationQueueServer = buildQueue
+		var stateServer buildqueuestate.BuildQueueStateServer = buildQueue
+		serverGroup := siblingsGroup
+
+		var gate *scheduler.LeaderGate
+		var dialer scheduler.EndpointDialer
+		var coordClient coordinator.CoordinatorClient
+		runMaintenance := func(fn func()) bool {
+			fn()
+			return true
+		}
+		if configuration.Coordinator != nil {
+			coordConn, err := grpcClientFactory.NewClientFromConfiguration(configuration.Coordinator.Client, dependenciesGroup)
+			if err != nil {
+				return util.StatusWrap(err, "Failed to create coordinator gRPC client")
+			}
+			coordClient = coordinator.NewCoordinatorClient(coordConn)
+			dialer = func(endpoint string) (grpc.ClientConnInterface, error) {
+				var clientCfg grpc_configuration.ClientConfiguration
+				if configuration.Coordinator.PeerClientTemplate != nil {
+					proto.Merge(&clientCfg, configuration.Coordinator.PeerClientTemplate)
+				}
+				clientCfg.Address = endpoint
+				return grpcClientFactory.NewClientFromConfiguration(&clientCfg, dependenciesGroup)
+			}
+			gate = scheduler.NewLeaderGate(buildQueue, dialer, scheduler.GateRoleFollower, nil)
+			clientBuildQueue = gate
+			workerQueueServer = gate
+			stateServer = gate
+			serverGroup = dependenciesGroup
+			runMaintenance = gate.RunMaintenance
+		}
 
 		// Force periodic cleanups of stale workers. This also
 		// happens automatically when RPCs occur, but that's not
@@ -167,7 +236,7 @@ func main() {
 			for {
 				select {
 				case <-t.C:
-					buildQueue.ForceCleanup()
+					runMaintenance(buildQueue.ForceCleanup)
 				case <-ctx.Done():
 					t.Stop()
 					return nil
@@ -176,28 +245,43 @@ func main() {
 		})
 
 		// Create predeclared platform queues.
-		for _, platformQueue := range configuration.PredeclaredPlatformQueues {
-			instanceName, err := digest.NewInstanceName(platformQueue.InstanceNamePrefix)
-			if err != nil {
-				return util.StatusWrapf(err, "Invalid instance name prefix %#v", platformQueue.InstanceNamePrefix)
-			}
-			workerInvocationStickinessLimits := make([]time.Duration, 0, len(platformQueue.WorkerInvocationStickinessLimits))
-			for i, d := range platformQueue.WorkerInvocationStickinessLimits {
-				if err := d.CheckValid(); err != nil {
-					return util.StatusWrapf(err, "Invalid worker invocation stickiness limit at index %d: %s", i)
-				}
-				workerInvocationStickinessLimits = append(workerInvocationStickinessLimits, d.AsDuration())
-			}
+		predeclaredQueues, err := parsePredeclaredPlatformQueues(configuration.PredeclaredPlatformQueues)
+		if err != nil {
+			return err
+		}
+		if _, err := buildQueue.ReconcilePredeclaredPlatformQueues(predeclaredQueues); err != nil {
+			return util.StatusWrap(err, "Failed to register predeclared platform queues")
+		}
 
-			if err := buildQueue.RegisterPredeclaredPlatformQueue(
-				instanceName,
-				platformQueue.Platform,
-				workerInvocationStickinessLimits,
-				int(platformQueue.MaximumQueuedBackgroundLearningOperations),
-				platformQueue.BackgroundLearningOperationPriority,
-				platformQueue.SizeClasses,
-			); err != nil {
-				return util.StatusWrap(err, "Failed to register predeclared platform queue")
+		// Optional: periodically reload the configuration file, so
+		// that changes to the predeclared platform queues and the
+		// action router are applied without a restart.
+		if reloadIntervalMessage := configuration.ConfigurationReloadInterval; reloadIntervalMessage != nil {
+			if err := reloadIntervalMessage.CheckValid(); err != nil {
+				return util.StatusWrap(err, "Invalid configuration reload interval")
+			}
+			if reloadInterval := reloadIntervalMessage.AsDuration(); reloadInterval > 0 {
+				configurationPath := os.Args[1]
+				initialActionRouterConfiguration := configuration.ActionRouter
+				dependenciesGroup.Go(func(ctx context.Context, siblingsGroup, dependenciesGroup program.Group) error {
+					newConfigurationReloader(
+						func() (*bb_scheduler.ApplicationConfiguration, error) {
+							var reloadedConfiguration bb_scheduler.ApplicationConfiguration
+							if err := util.UnmarshalConfigurationFromFile(configurationPath, &reloadedConfiguration); err != nil {
+								return nil, util.StatusWrapf(err, "Failed to read configuration from %s", configurationPath)
+							}
+							return &reloadedConfiguration, nil
+						},
+						func(actionRouterConfiguration *scheduler_pb.ActionRouterConfiguration) (routing.ActionRouter, error) {
+							return routing.NewActionRouterFromConfiguration(actionRouterConfiguration, previousExecutionStatsStore, grpcClientFactory, dependenciesGroup)
+						},
+						buildQueue,
+						actionRouter,
+						initialActionRouterConfiguration,
+						runMaintenance,
+					).run(ctx, reloadInterval)
+					return nil
+				})
 			}
 		}
 
@@ -207,11 +291,11 @@ func main() {
 			func(s grpc.ServiceRegistrar) {
 				remoteexecution.RegisterCapabilitiesServer(
 					s,
-					capabilities.NewServer(buildQueue),
+					capabilities.NewServer(clientBuildQueue),
 				)
-				remoteexecution.RegisterExecutionServer(s, buildQueue)
+				remoteexecution.RegisterExecutionServer(s, clientBuildQueue)
 			},
-			siblingsGroup,
+			serverGroup,
 			grpcClientFactory,
 		); err != nil {
 			return util.StatusWrap(err, "Client gRPC server failure")
@@ -219,9 +303,9 @@ func main() {
 		if err := bb_grpc.NewServersFromConfigurationAndServe(
 			configuration.WorkerGrpcServers,
 			func(s grpc.ServiceRegistrar) {
-				remoteworker.RegisterOperationQueueServer(s, buildQueue)
+				remoteworker.RegisterOperationQueueServer(s, workerQueueServer)
 			},
-			siblingsGroup,
+			serverGroup,
 			grpcClientFactory,
 		); err != nil {
 			return util.StatusWrap(err, "Worker gRPC server failure")
@@ -229,12 +313,25 @@ func main() {
 		if err := bb_grpc.NewServersFromConfigurationAndServe(
 			configuration.BuildQueueStateGrpcServers,
 			func(s grpc.ServiceRegistrar) {
-				buildqueuestate.RegisterBuildQueueStateServer(s, buildQueue)
+				buildqueuestate.RegisterBuildQueueStateServer(s, stateServer)
 			},
-			siblingsGroup,
+			serverGroup,
 			grpcClientFactory,
 		); err != nil {
 			return util.StatusWrap(err, "Build queue state gRPC server failure")
+		}
+		if len(configuration.HandoverGrpcServers) > 0 {
+			handoverServer := scheduler.NewHandoverServer(gate, coordClient)
+			if err := bb_grpc.NewServersFromConfigurationAndServe(
+				configuration.HandoverGrpcServers,
+				func(s grpc.ServiceRegistrar) {
+					schedulerhandover.RegisterHandoverServer(s, handoverServer)
+				},
+				serverGroup,
+				grpcClientFactory,
+			); err != nil {
+				return util.StatusWrap(err, "Handover gRPC server failure")
+			}
 		}
 
 		// Web server for metrics and profiling.
@@ -244,15 +341,65 @@ func main() {
 			routePrefix += "/"
 		}
 		subrouter := router.PathPrefix(routePrefix).Subrouter()
-		newBuildQueueStateService(buildQueue, clock.SystemClock, portalURL, subrouter)
+		newBuildQueueStateService(stateServer, clock.SystemClock, portalURL, subrouter)
 		http_server.NewServersFromConfigurationAndServe(
 			configuration.DeprecatedAdminHttpServers,
 			http_server.NewMetricsHandler(router, "SchedulerUI"),
-			siblingsGroup,
+			serverGroup,
 			grpcClientFactory,
 		)
+
+		if configuration.Coordinator != nil {
+			selfEndpoints := &schedulerhandover.LeaderEndpoints{
+				LeaderId:         configuration.Coordinator.SelfId,
+				ClientEndpoint:   configuration.Coordinator.SelfClientEndpoint,
+				WorkerEndpoint:   configuration.Coordinator.SelfWorkerEndpoint,
+				StateEndpoint:    configuration.Coordinator.SelfStateEndpoint,
+				HandoverEndpoint: configuration.Coordinator.SelfHandoverEndpoint,
+			}
+			siblingsGroup.Go(func(ctx context.Context, siblingsGroup, dependenciesGroup program.Group) error {
+				return scheduler.RunCoordinatorLoop(
+					ctx,
+					gate,
+					dialer,
+					coordClient,
+					selfEndpoints,
+					relayDrainPeriod,
+					func() {
+						lifecycleState.MarkReadyAndWait(dependenciesGroup)
+					},
+				)
+			})
+			return nil
+		}
 
 		lifecycleState.MarkReadyAndWait(siblingsGroup)
 		return nil
 	})
+}
+
+func parsePredeclaredPlatformQueues(configs []*bb_scheduler.PredeclaredPlatformQueueConfiguration) ([]scheduler.PredeclaredPlatformQueueParams, error) {
+	queues := make([]scheduler.PredeclaredPlatformQueueParams, 0, len(configs))
+	for _, platformQueue := range configs {
+		instanceName, err := digest.NewInstanceName(platformQueue.InstanceNamePrefix)
+		if err != nil {
+			return nil, util.StatusWrapf(err, "Invalid instance name prefix %#v", platformQueue.InstanceNamePrefix)
+		}
+		workerInvocationStickinessLimits := make([]time.Duration, 0, len(platformQueue.WorkerInvocationStickinessLimits))
+		for i, d := range platformQueue.WorkerInvocationStickinessLimits {
+			if err := d.CheckValid(); err != nil {
+				return nil, util.StatusWrapf(err, "Invalid worker invocation stickiness limit at index %d", i)
+			}
+			workerInvocationStickinessLimits = append(workerInvocationStickinessLimits, d.AsDuration())
+		}
+		queues = append(queues, scheduler.PredeclaredPlatformQueueParams{
+			InstanceNamePrefix:                        instanceName,
+			Platform:                                  platformQueue.Platform,
+			WorkerInvocationStickinessLimits:          workerInvocationStickinessLimits,
+			MaximumQueuedBackgroundLearningOperations: int(platformQueue.MaximumQueuedBackgroundLearningOperations),
+			BackgroundLearningOperationPriority:       platformQueue.BackgroundLearningOperationPriority,
+			SizeClasses:                               platformQueue.SizeClasses,
+		})
+	}
+	return queues, nil
 }

@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+package buildbarn.coordinator;
+
+import "github.com/buildbarn/bb-remote-execution/pkg/proto/schedulerhandover/schedulerhandover.proto";
+
+option go_package = "github.com/buildbarn/bb-remote-execution/pkg/proto/coordinator";
+
+// Coordinator abstracts leader election and handover signalling so
+// bb_scheduler remains independent of the backing store (Kubernetes
+// Lease in Phase 1, NATS JetStream KV in Phase 2).
+service Coordinator {
+  // Watch registers this scheduler instance with the coordinator and
+  // streams role and leader endpoint updates.
+  rpc Watch(WatchRequest) returns (stream WatchResponse);
+
+  // Read the current, unexpired leadership record directly from the
+  // backing store. Used to resolve an interrupted handover; cached Watch
+  // state is not sufficient to decide whether a transfer committed.
+  rpc GetLeadership(GetLeadershipRequest) returns (WatchResponse);
+
+  // TransferLeadership atomically transfers leadership to target if the
+  // backing lease is still at expected_epoch.
+  rpc TransferLeadership(TransferLeadershipRequest)
+      returns (TransferLeadershipResponse);
+
+  // RequestHandover is invoked by the active leader during graceful
+  // shutdown (SIGTERM) to ask the coordinator to trigger a takeover by
+  // an available peer scheduler.
+  rpc RequestHandover(RequestHandoverRequest) returns (RequestHandoverResponse);
+}
+
+enum Role {
+  ROLE_UNKNOWN = 0;
+  FOLLOWER = 1;
+  LEADER = 2;
+  TAKE_OVER = 3;
+}
+
+message WatchRequest {
+  buildbarn.schedulerhandover.LeaderEndpoints self = 1;
+}
+
+message GetLeadershipRequest {
+  // Before confirming that this replica is still the leader, advance the
+  // Lease resource version without extending its lifetime. This prevents
+  // an earlier timed-out transfer write from committing after the reply.
+  bool fence_pending_transfer = 1;
+}
+
+message WatchResponse {
+  Role role = 1;
+  buildbarn.schedulerhandover.LeaderEndpoints leader = 2;
+  uint64 lease_epoch = 3;
+}
+
+message TransferLeadershipRequest {
+  buildbarn.schedulerhandover.LeaderEndpoints target = 1;
+  uint64 expected_epoch = 2;
+}
+
+message TransferLeadershipResponse {
+  uint64 new_epoch = 1;
+}
+
+message RequestHandoverRequest {
+  string self_id = 1;
+}
+
+message RequestHandoverResponse {
+  bool peer_notified = 1;
+  buildbarn.schedulerhandover.LeaderEndpoints peer = 2;
+}

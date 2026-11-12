@@ -1,0 +1,3 @@
+# Buildkite caches (see .buildkite/) contain Bazel's output root and other
+# downloaded sources, not workspace packages.
+.bkcache
